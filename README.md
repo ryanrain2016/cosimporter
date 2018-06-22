@@ -32,7 +32,8 @@ nice job
 "print('nice job')\n"
 >>>
 ```
+已支持, 源码, 字节码文件, 扩展文件（因平台后缀名不同， 例如win上只能加载.pyd文件， linux可以加载.so文件）
+支持pkgutil.get_data()来获取数据文件内容
 
 # 遗留问题
-+ 目前只支持py文件格式，暂不支持pyd, so等其他python可加载的格式
 + 目前只支持一个cos的账号，不支持多个cos的账号同时导入
