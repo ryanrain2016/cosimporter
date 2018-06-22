@@ -5,8 +5,12 @@ import logging
 import sys
 import importlib.abc
 import imp
+# from importlib._bootstrap import _load_module_shim
 
-logging.basicConfig(level=logging.WARN, stream=sys.stdout)
+logging.basicConfig(
+    # level=logging.DEBUG,
+    format = '%(asctime)s - %(name)s - %(filename)s[%(lineno)d] - %(levelname)s - %(message)s',
+    stream=sys.stdout)
 log = logging.getLogger(__name__)
 
 _cosclient = None
@@ -19,77 +23,31 @@ def _install_cos(bucket, secret_id, secret_key, region, token=''):
     _cosbucket = bucket
     install_path_hook()
 
+def _format_path(path):
+    return path.replace('\\', '/').strip('/')
+
+def _path_join(*paths):
+    return '/'.join(map(_format_path, paths))
+
+_links = {}
+
 def _get_links(key):
-    global _cosclient, _cosbucket
-    # if key.startswith('cos://'):
-    #     key = key[6:]
-    key = key.replace('//', '/')
-    key = key.strip('/') + '/'
+    global _cosclient, _cosbucket, _links
+    key = _format_path(key) + '/'
+    if key.startswith('cos://'):
+        key = key[6:]
+    if key in _links:
+        return _links[key]
+    log.debug('get links key: %s', key)
     ret = _cosclient.list_objects(_cosbucket, key, Delimiter="/", MaxKeys=100)
-    log.debug('ret: %s', ret)
-    contents = ret.get('Contents')
-    commonPrefixes = ret.get('CommonPrefixes')
-    if contents is None:
-        return set()
+    contents = ret.get('Contents', set())
+    commonPrefixes = ret.get('CommonPrefixes', set())
     l = len(key)
     links = {x['Key'][l:] for x in contents if x['Key']!=key}
-    if commonPrefixes is not None:
-        links |= {x['Prefix'][l:].rstrip('/') for x in commonPrefixes}
+    links |= {x['Prefix'][l:].rstrip('/') for x in commonPrefixes}
     log.debug('links: %s', links)
+    _links[key] = links
     return links
-
-class CosMetaFinder(importlib.abc.MetaPathFinder):
-    def __init__(self, key):
-        global _cosclient
-        if _cosclient is None:
-            return
-        self._basepath = key
-        self._links = {}
-        self._loaders = {key: CosModuleLoader(key)}
-
-    def find_module(self, fullname, path=None):  #根据fullname返回moduleloader
-        log.debug('find_module: fullname=%r, path=%r', fullname, path)
-        global _cosclient
-        if _cosclient is None:
-            return None
-        if path is None:
-            baseurl = self._basepath
-        else:
-            if not path[0].startswith('cos://'+self._basepath):
-                return None
-            baseurl = path[0][6:]
-        parts = fullname.split('.')
-        basename = parts[-1]
-        log.debug('find_module: baseurl=%r, basename=%r', baseurl, basename)
-        if basename not in self._links:
-            self._links[baseurl] = _get_links(baseurl)
-        if basename in self._links[baseurl]:
-            log.debug('find_module: trying package %r', fullname)
-            fullurl = self._basepath + '/' + basename
-            fullurl = fullurl.replace('//', '/')
-            loader = CosPackageLoader(fullurl)
-            try:
-                loader.load_module(fullname)
-                self._links[fullurl] = _get_links(fullurl)
-                self._loaders[fullurl] = CosModuleLoader(fullurl)
-                log.debug('find_module: package %r loaded', fullname)
-            except ImportError as e:
-                log.debug('find_module: package failed. %s', e)
-                loader = None
-            return loader
-        # A normal module
-        filename = basename + '.py'
-        if filename in self._links[baseurl]:
-            log.debug('find_module: module %r found', fullname)
-            return self._loaders[baseurl]
-        else:
-            log.debug('find_module: module %r not found', fullname)
-            return None
-
-    def invalidate_caches(self):
-        log.debug('invalidating link cache')
-        self._links.clear()
-
 
 class CosModuleLoader(importlib.abc.SourceLoader):
     def __init__(self, path):
@@ -99,42 +57,52 @@ class CosModuleLoader(importlib.abc.SourceLoader):
     def module_repr(self, module):
         return '<cosmodule %r from %r>' % (module.__name__, module.__file__)
 
-    def load_module(self, fullname): #返回模块
-        code = self.get_code(fullname)
-        mod = sys.modules.setdefault(fullname, imp.new_module(fullname))
-        mod.__file__ = self.get_filename(fullname)
-        mod.__loader__ = self
-        mod.__package__ = fullname.rpartition('.')[0]
-        exec(code, mod.__dict__)
-        return mod
+    # def load_module1(self, fullname): # 这个方法不能解决包内相对导入问题， 不实现使用默认方法
+    #     log.debug('load_module: %s', fullname)
+    #     return _load_module_shim(self, fullname)
+    #     code = self.get_code(fullname)
+    #     mod = sys.modules.setdefault(fullname, imp.new_module(fullname))
+    #     mod.__name__ = fullname
+    #     mod.__file__ = self.get_filename(fullname)
+    #     mod.__loader__ = self
+    #     mod.__package__ = fullname.rpartition('.')[0]
+    #     if self.is_package:
+    #         mod.__path__ = [self._basepath]
+    #     log.debug('mod attr:%s', mod.__dict__)
+    #     exec(code, mod.__dict__)
+    #     return mod
 
     def get_code(self, fullname):
         src = self.get_source(fullname)
-        return compile(src, self.get_filename(fullname), 'exec')
+        return compile(src, self.get_filename(fullname), 'exec', dont_inherit=True)
 
     def get_data(self, path):
-        pass
+        path = _format_path(path)[6:]
+        try:
+            u = _cosclient.get_object(_cosbucket, path)
+            data = u['Body'].get_raw_stream().read()
+            log.debug('loade data: %r loaded', path)
+            return data
+        except CosServiceError as e:
+            log.debug('loade data: %r failed. %s', path, e)
+            raise ImportError("Can't load data %s" % path)
 
     def get_filename(self, fullname):
-        return 'cos://'+(self._basepath + '/' + fullname.split('.')[-1] + '.py').replace('//', '/')
+        filename = _path_join(self._basepath, fullname.split('.')[-1] + '.py')
+        if not filename.startswith('cos://'):
+            filename = 'cos://' + filename
+        return filename
 
     def get_source(self, fullname):
         global _cosclient, _cosbucket
         filename = self.get_filename(fullname)
-        filename = filename[6:]
         log.debug('loader: reading %r', filename)
         if filename in self._source_cache:
             log.debug('loader: cached %r', filename)
             return self._source_cache[filename]
-        try:
-            u = _cosclient.get_object(_cosbucket, filename)
-            source = u['Body'].get_raw_stream().read().decode('utf-8')
-            log.debug('loader: %r loaded', filename)
-            self._source_cache[filename] = source
-            return source
-        except CosServiceError as e:
-            log.debug('loader: %r failed. %s', filename, e)
-            raise ImportError("Can't load %s" % filename)
+        source = self.get_data(filename).decode('utf-8')
+        self._source_cache[filename] = source
+        return source
 
     def is_package(self, fullname):
         return False
@@ -146,25 +114,13 @@ class CosPackageLoader(CosModuleLoader):
         mod.__package__ = fullname
 
     def get_filename(self, fullname):
-        return 'cos://' + (self._basepath + '/' + '__init__.py').replace('//', '/')
+        filename = _path_join(self._basepath, '__init__.py')
+        if not filename.startswith('cos://'):
+            filename = 'cos://' + filename
+        return filename
 
     def is_package(self, fullname):
         return True
-
-# Utility functions for installing/uninstalling the loader
-_installed_meta_cache = { }
-def install_meta(address):
-    if address not in _installed_meta_cache:
-        finder = CosMetaFinder(address)
-        _installed_meta_cache[address] = finder
-        sys.meta_path.append(finder)
-        log.debug('%r installed on sys.meta_path', finder)
-
-def remove_meta(address):
-    if address in _installed_meta_cache:
-        finder = _installed_meta_cache.pop(address)
-        sys.meta_path.remove(finder)
-        logging.debug('%r removed from sys.meta_path', finder)
 
 class CosPathFinder(importlib.abc.PathEntryFinder):
     def __init__(self, baseurl):
@@ -184,17 +140,20 @@ class CosPathFinder(importlib.abc.PathEntryFinder):
         # Check if it's a package
         if basename in self._links:
             log.debug('find_loader: trying package %r', fullname)
-            fullurl = (self._baseurl + '/' + basename).replace('//', '/')
+            fullurl = _path_join(self._baseurl, basename)
+            if not fullurl.startswith('cos://'):
+                fullurl = 'cos://' + fullurl
             # Attempt to load the package (which accesses __init__.py)
             loader = CosPackageLoader(fullurl)
             try:
                 loader.load_module(fullname)
                 log.debug('find_loader: package %r loaded', fullname)
             except ImportError as e:
+                import traceback as tb
+                print(tb.format_exc())
                 log.debug('find_loader: %r is a namespace package', fullname)
                 loader = None
             return (loader, [fullurl])
-
         # A normal module
         filename = basename + '.py'
         if filename in self._links:
