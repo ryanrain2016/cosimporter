@@ -8,18 +8,19 @@ import imp
 from importlib.machinery import SOURCE_SUFFIXES, BYTECODE_SUFFIXES, EXTENSION_SUFFIXES
 from importlib._bootstrap_external import _validate_bytecode_header, _compile_bytecode
 from importlib._bootstrap_external import _bootstrap, _imp
-
-__version__ = '0.0.1'
+import tempfile, os
 
 logging.basicConfig(
     # level=logging.DEBUG,
     format = '%(asctime)s - %(name)s - %(filename)s[%(lineno)d] - %(levelname)s - %(message)s',
     stream=sys.stdout)
 log = logging.getLogger(__name__)
-# log.setLevel(logging.DEBUG)
+log.setLevel(logging.DEBUG)
 
 _cosclient = None
 _cosbucket = None
+
+_extensions = []
 
 def _install_cos(bucket, secret_id, secret_key, region, token=''):
     global _cosclient, _cosbucket
@@ -62,23 +63,6 @@ class CosSourceLoader(importlib.abc.SourceLoader):
 
     def module_repr(self, module):
         return '<cosmodule %r from %r>' % (module.__name__, module.__file__)
-
-    # def load_module(self, fullname): # 这个方法不能解决包内相对导入问题， 不实现使用默认方法
-    #     log.debug('load_module: %s', fullname)
-    #     return _load_module_shim(self, fullname)
-    #     code = self.get_code(fullname)
-    #     mod = sys.modules.setdefault(fullname, imp.new_module(fullname))
-    #     mod.__name__ = fullname
-    #     mod.__file__ = self.get_filename(fullname)
-    #     mod.__loader__ = self
-    #     log.debug('mod attr:%s', mod.__dict__)
-    #     exec(code, mod.__dict__)
-    #     return mod
-
-    # def get_code(self, fullname):
-    #     print('############## fullname:', fullname)
-    #     src = self.get_source(fullname)
-    #     return compile(src, self.get_filename(fullname), 'exec', dont_inherit=True)
 
     def get_data(self, path):
         path = _format_path(path)[6:]
@@ -137,6 +121,7 @@ class CosSourcelessLoader(CosSourceLoader):
     def get_source(self, fullname):
         pass
 
+from contextlib import contextmanager
 class CosExtensionLoader(CosSourceLoader):
     def get_code(self, fullname):
         pass
@@ -157,8 +142,24 @@ class CosExtensionLoader(CosSourceLoader):
 
     def create_module(self, spec):
         """Create an unitialized extension module"""
+        global _extensions
+        path = spec.origin
+        data = self.get_data(path)
+        path = path[6:]
+        tempdir = tempfile.gettempdir()
+        d = path.rsplit('/', 1)[0]
+        dirpath = os.path.join(tempdir, d)
+        try:
+            os.mkdir(dirpath)
+        except FileExistsError:
+            pass
+        mod_file = os.path.join(tempdir, path)
+        with open(mod_file, 'wb') as f:
+            f.write(data)
+        spec.origin = mod_file
         module = _bootstrap._call_with_frames_removed(
             _imp.create_dynamic, spec)
+        _extensions.append((module, mod_file))
         return module
 
     def exec_module(self, module):
