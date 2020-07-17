@@ -4,9 +4,9 @@ import sys
 import logging
 import sys
 import importlib.abc
-import imp
+# import imp
 from importlib.machinery import SOURCE_SUFFIXES, BYTECODE_SUFFIXES, EXTENSION_SUFFIXES
-from importlib._bootstrap_external import _validate_bytecode_header, _compile_bytecode
+from importlib._bootstrap_external import _compile_bytecode #, _validate_bytecode_header
 from importlib._bootstrap_external import _bootstrap, _imp
 import tempfile, os
 
@@ -15,7 +15,7 @@ logging.basicConfig(
     format = '%(asctime)s - %(name)s - %(filename)s[%(lineno)d] - %(levelname)s - %(message)s',
     stream=sys.stdout)
 log = logging.getLogger(__name__)
-log.setLevel(logging.DEBUG)
+log.setLevel(logging.ERROR)
 
 _cosclient = None
 _cosbucket = None
@@ -103,7 +103,8 @@ class CosSourcelessLoader(CosSourceLoader):
     def get_code(self, fullname):
         path = self.get_filename(fullname)
         data = self.get_data(path)
-        bytes_data = _validate_bytecode_header(data, name=fullname, path=path)
+        bytes_data = memoryview(data)[16:]
+        # bytes_data = _validate_bytecode_header(data, name=fullname, path=path)
         return _compile_bytecode(bytes_data, name=fullname, bytecode_path=path)
 
 
